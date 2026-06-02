@@ -73,17 +73,15 @@ Time is in 24-hour format (`09:00`, `14:30`).
 
 ## 5. Run the scheduler
 
+You must activate the virtual environment **every time** you open a new terminal:
+
 ```bash
 cd /path/to/aj
 source ~/selenium-env/bin/activate
-python3 main.py schedule.txt
-```
-
-To set your display name in the meeting:
-
-```bash
 python3 main.py schedule.txt --name "Your Name"
 ```
+
+> **Important:** always run `source ~/selenium-env/bin/activate` first. Running `python3` without it will fail with *"selenium is not installed"* because selenium lives inside the venv, not the system Python.
 
 Leave the terminal open. Press `Ctrl + C` to stop.
 

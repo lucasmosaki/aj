@@ -8,11 +8,5 @@
 #
 # Lines starting with # are comments and are ignored.
 # ──────────────────────────────────────────────────────────────────
-#Entrepreneurship
-2026-06-02 10:14 https://www.sympla.com.br/meeting-room/j56ExNGbo5HBW8c6QFLW7sjX63EhNL9FCa5mqARcn8C6FcdXoNBddywjKs8a9SzsUhsEN8lM2kPA7y0DoRB3gA
-#
-#Neuroscience
-2026-06-02 11:25 https://www.sympla.com.br/meeting-room/FDlLpe3mCOjnuPv6MfZzEPlGx8FqU0m5Q4yEkBQ0CeIoQT7jAcZcd2o3tsyeC6uJFnEddH8ZmDpKbeF5FLUcDg
-#
 #Political Science
-2026-06-02 14:00 https://www.sympla.com.br/meeting-room/LtM9Hz4yZSIwF_e_3rHIFAHXjPyoUDtgxKl8KzdWo26grLnz0olValQuFstmhojE_Q-13EqbdRjDACzJSv7Wxg
+2026-06-02 15:29 https://www.sympla.com.br/meeting-room/LtM9Hz4yZSIwF_e_3rHIFAHXjPyoUDtgxKl8KzdWo26grLnz0olValQuFstmhojE_Q-13EqbdRjDACzJSv7Wxg

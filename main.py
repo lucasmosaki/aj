@@ -91,7 +91,7 @@ def create_driver(browser: str):
 
     opts = webdriver.ChromeOptions()
     opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--disable-external-protocol-dialogs")  # suppress xdg-open dialogs
+    opts.add_argument("--disable-external-protocol-dialogs")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
@@ -100,6 +100,11 @@ def create_driver(browser: str):
     opts.add_experimental_option("prefs", {
         "protocol_handler.excluded_schemes": {"zoommtg": True, "zoomus": True},
         "profile.default_content_setting_values.popups": 1,
+        # Block mic/camera at Chrome level so no permission popup ever appears.
+        # Zoom can't access devices, so it shows its own "continue without mic/camera"
+        # dialog which our code then clicks.
+        "profile.default_content_setting_values.media_stream_mic": 2,
+        "profile.default_content_setting_values.media_stream_camera": 2,
     })
 
     system = platform.system()
@@ -150,7 +155,11 @@ _BROWSER_JOIN_SELECTORS = [
 _NAME_SELECTORS = [
     ("css",  "input#inputname"),
     ("css",  "input[placeholder*='Your Name']"),
-    ("css",  "input[placeholder*='name']"),
+    ("css",  "input[placeholder*='name' i]"),
+    ("css",  "input[placeholder*='nome' i]"),
+    ("css",  "input[placeholder*='Name' i]"),
+    ("css",  "input.preview-name-input"),
+    ("css",  "input[data-testid*='name' i]"),
     ("name", "name"),
 ]
 
@@ -195,6 +204,7 @@ def _click_audio_skip_js(driver, timeout=45):
     selectors often miss elements — JS DOM traversal is more reliable.
     """
     _SKIP_KEYWORDS = [
+        # English
         "continue without audio and video",
         "continue without microphone and camera",
         "continue without microphone",
@@ -205,29 +215,73 @@ def _click_audio_skip_js(driver, timeout=45):
         "continue without audio",
         "continue without",
         "without microphone",
+        # Portuguese (Brazilian)
+        "continuar sem áudio e vídeo",
+        "continuar sem microfone e câmera",
+        "continuar sem microfone e camera",
+        "continuar sem microfone",
+        "sem microfone e câmera",
+        "sem microfone e camera",
+        "entrar sem áudio",
+        "entrar sem audio",
+        "sem áudio e vídeo",
+        "sem audio e video",
+        "continuar sem vídeo",
+        "continuar sem video",
+        "continuar sem áudio",
+        "continuar sem audio",
+        "continuar sem",
+        "sem microfone",
     ]
+    from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.common.exceptions import StaleElementReferenceException, ElementClickInterceptedException
+
     deadline = time.time() + timeout
     while time.time() < deadline:
         for kw in _SKIP_KEYWORDS:
-            found = driver.execute_script("""
+            # Return the DOM element to Python so we can click it via Selenium
+            # (plain JS el.click() doesn't fire React synthetic events).
+            # Prefer button/a so we target the actual interactive control, not a
+            # parent container whose textContent also contains the keyword.
+            el = driver.execute_script("""
                 var kw = arguments[0];
-                var tags = ['button','a','span','div','p'];
-                for (var t = 0; t < tags.length; t++) {
-                    var els = document.getElementsByTagName(tags[t]);
-                    for (var i = 0; i < els.length; i++) {
-                        var el = els[i];
-                        if (!el.offsetParent) continue;
-                        var text = (el.textContent || '').toLowerCase().trim();
-                        if (text && text.length < 100 && text.includes(kw)) {
-                            el.click();
-                            return text;
+                var preferred = ['button', 'a'];
+                var fallback  = ['span', 'div', 'p', 'li'];
+                function scan(tags) {
+                    for (var t = 0; t < tags.length; t++) {
+                        var els = document.getElementsByTagName(tags[t]);
+                        for (var i = 0; i < els.length; i++) {
+                            var el = els[i];
+                            var rect = el.getBoundingClientRect();
+                            if (rect.width === 0 || rect.height === 0) continue;
+                            var style = window.getComputedStyle(el);
+                            if (style.display === 'none' || style.visibility === 'hidden'
+                                    || parseFloat(style.opacity) < 0.1) continue;
+                            var text = (el.textContent || '').toLowerCase().trim();
+                            if (text && text.length < 120 && text.includes(kw)) return el;
                         }
                     }
+                    return null;
                 }
-                return null;
+                return scan(preferred) || scan(fallback);
             """, kw)
-            if found:
-                return found
+            if el:
+                try:
+                    el_text = (el.text or "").lower().strip() or kw
+                    # ActionChains fires a real browser click that React's event
+                    # delegation picks up; fall back to element.click() / JS.
+                    try:
+                        ActionChains(driver).move_to_element(el).click().perform()
+                    except ElementClickInterceptedException:
+                        driver.execute_script("arguments[0].click();", el)
+                    except Exception:
+                        try:
+                            el.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", el)
+                    return el_text
+                except StaleElementReferenceException:
+                    break  # element vanished mid-scan; retry outer loop
         time.sleep(1)
     return None
 
@@ -256,11 +310,13 @@ def _handle_zoom_page(driver, display_name: str):
                 pass
             break
 
-    # If audio/camera skip prompt is already visible (e.g. cached session), dismiss it
+    # Phase 3 Zoom shows the "Continue without microphone and camera" option on the
+    # preview page BEFORE the Join button — click it if present, but do NOT return
+    # early. The name field and Join button may still be needed.
     found = _click_audio_skip_js(driver, timeout=3)
     if found:
         print(f"  Clicked audio skip (pre-join): {found!r}")
-        return
+        time.sleep(1)
 
     print("  On Zoom page — looking for 'Join from browser'...")
     join_link = _find_clickable(driver, _BROWSER_JOIN_SELECTORS, timeout=5)
@@ -273,16 +329,45 @@ def _handle_zoom_page(driver, display_name: str):
     else:
         print("  No join-from-browser link — proceeding to name/join step.")
 
-    if display_name:
-        name_el = _find_clickable(driver, _NAME_SELECTORS, timeout=10)
+    # Zoom Phase 3 requires a name before the Join button is enabled.
+    # Use display_name if given, otherwise fall back to "Student".
+    name_to_use = display_name or "Student"
+    name_el = _find_clickable(driver, _NAME_SELECTORS, timeout=10)
+    if not name_el:
+        # JS fallback: find the first visible text input on the page
+        name_el = driver.execute_script("""
+            var inputs = document.querySelectorAll('input[type="text"], input:not([type])');
+            for (var i = 0; i < inputs.length; i++) {
+                var el = inputs[i];
+                var rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    var style = window.getComputedStyle(el);
+                    if (style.display !== 'none' && style.visibility !== 'hidden') return el;
+                }
+            }
+            return null;
+        """)
         if name_el:
+            print("  Found name field via JS fallback")
+    if name_el:
+        try:
             name_el.clear()
-            name_el.send_keys(display_name)
-            print(f"  Entered name: {display_name}")
+        except Exception:
+            pass
+        name_el.send_keys(name_to_use)
+        print(f"  Entered name: {name_to_use}")
+    else:
+        print("  WARNING: name field not found — Join button may stay disabled")
 
     join_btn = _find_clickable(driver, _JOIN_BTN_SELECTORS, timeout=10)
     if join_btn:
-        join_btn.click()
+        try:
+            join_btn.click()
+        except Exception:
+            try:
+                ActionChains(driver).move_to_element(join_btn).click().perform()
+            except Exception:
+                driver.execute_script("arguments[0].click();", join_btn)
         print("  Clicked Join.")
     else:
         print("  Join button not found — may have auto-joined.")
@@ -290,25 +375,46 @@ def _handle_zoom_page(driver, display_name: str):
     # After clicking Join, the web client connects via WebSocket then shows the
     # audio/camera prompt. The new Zoom client (joinFlowPhase3) can take 30+ sec
     # to connect before the dialog appears — wait up to 45 s.
-    print("  Waiting for audio/camera prompt (up to 45s)...")
-    found = _click_audio_skip_js(driver, timeout=45)
+    print("  Waiting for audio/camera prompt (up to 60s)...")
+    found = _click_audio_skip_js(driver, timeout=60)
     if found:
         print(f"  Clicked audio skip: {found!r} — in the meeting.")
     else:
-        # Debug dump: show all visible interactive elements
-        visible = driver.execute_script("""
-            var result = [];
-            var els = document.querySelectorAll('button, a, [role="button"]');
+        # When Chrome blocks mic/camera at the pref level, Zoom joins silently
+        # without showing the audio dialog. Check whether the meeting toolbar
+        # (Leave button) is already visible — if so, we're in the meeting.
+        in_meeting = driver.execute_script("""
+            var els = document.querySelectorAll('button, [role="button"], span, div');
             for (var i = 0; i < els.length; i++) {
-                var el = els[i];
-                var text = (el.textContent || '').trim();
-                if (text && el.offsetParent) result.push(text.substring(0, 70));
+                var t = (els[i].textContent || '').trim().toLowerCase();
+                if (t === 'leave' || t === 'leave meeting') {
+                    var r = els[i].getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) return true;
+                }
             }
-            return result.slice(0, 25);
+            return false;
         """)
-        print("  Audio prompt not found. Visible buttons/links on page:")
-        for v in (visible or []):
-            print(f"    {v!r}")
+        if in_meeting:
+            print("  Joined meeting (no audio dialog — mic/camera blocked at browser level).")
+            # Dismiss the "enable access to microphone/camera" banner if present
+            dismissed = driver.execute_script("""
+                var els = document.querySelectorAll('button, [aria-label*="close" i], [aria-label*="dismiss" i]');
+                for (var i = 0; i < els.length; i++) {
+                    var el = els[i];
+                    var r = el.getBoundingClientRect();
+                    if (r.width === 0 || r.height === 0) continue;
+                    var lbl = (el.getAttribute('aria-label') || el.textContent || '').toLowerCase();
+                    if (lbl.includes('close') || lbl === '×' || lbl === 'x') {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            """)
+            if dismissed:
+                print("  Dismissed access banner.")
+        else:
+            print("  Could not confirm join — audio dialog not found and meeting toolbar not visible.")
 
 
 # ── Zoom URL helpers ──────────────────────────────────────────────────────────
@@ -401,8 +507,11 @@ def _join_via_sympla(url: str, display_name: str, browser: str):
                 print(f"  Navigating to web client: {target[:80]}")
                 driver.get(target)
                 time.sleep(3)
-                _handle_zoom_page(driver, display_name)
-                return
+                try:
+                    _handle_zoom_page(driver, display_name)
+                except Exception as e:
+                    print(f"  Zoom join error: {e.__class__.__name__}: {str(e)[:120]}")
+                return  # always exit after navigating to Zoom
 
         except InvalidSessionIdException:
             print("  Browser session lost — reopening...")
