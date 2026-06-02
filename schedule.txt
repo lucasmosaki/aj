@@ -22,3 +22,5 @@
 
 # ── Add your classes below (remove the # to activate) ──────────────────────
 # Mon 09:00 https://zoom.us/j/your-meeting-id
+
+Tue 10:35 https://www.sympla.com.br/meeting-room/kUOx176k7g_C6DTqSNm2rriMEmIHLDPijefCH31nTYThywRTy1jXHWPnOZ05_gQMGBYnD3mEllVetW7PKb2ihg
