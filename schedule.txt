@@ -1,0 +1,21 @@
+# Zoom Class Schedule
+# ──────────────────────────────────────────────────────────────────
+# Formats (one entry per line):
+#
+#   HH:MM <url>                 opens every day at that time
+#   Weekday HH:MM <url>         opens every week on that day (Mon/Tue/Wed/Thu/Fri/Sat/Sun)
+#   YYYY-MM-DD HH:MM <url>      opens once on that exact date and time
+#
+# Lines starting with # are comments and are ignored.
+# ──────────────────────────────────────────────────────────────────
+
+# Daily morning standup
+# 09:00 https://zoom.us/j/1234567890?pwd=example
+
+# Weekly lectures (Mon / Wed / Fri)
+# Mon 10:30 https://zoom.us/j/9876543210
+# Wed 10:30 https://zoom.us/j/9876543210
+# Fri 10:30 https://zoom.us/j/9876543210
+
+# One-time session on a specific date
+# 2026-06-05 14:00 https://zoom.us/j/1122334455
