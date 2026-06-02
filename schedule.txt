@@ -19,3 +19,6 @@
 
 # One-time session on a specific date
 # 2026-06-05 14:00 https://zoom.us/j/1122334455
+
+# ── Add your classes below (remove the # to activate) ──────────────────────
+# Mon 09:00 https://zoom.us/j/your-meeting-id
