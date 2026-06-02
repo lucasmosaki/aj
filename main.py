@@ -91,8 +91,16 @@ def create_driver(browser: str):
 
     opts = webdriver.ChromeOptions()
     opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--disable-external-protocol-dialogs")  # suppress xdg-open dialogs
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
     opts.add_experimental_option("excludeSwitches", ["enable-automation"])
     opts.add_experimental_option("useAutomationExtension", False)
+    opts.add_experimental_option("prefs", {
+        "protocol_handler.excluded_schemes": {"zoommtg": True, "zoomus": True},
+        "profile.default_content_setting_values.popups": 1,
+    })
 
     system = platform.system()
     if system == "Linux":
@@ -127,12 +135,16 @@ def create_driver(browser: str):
 # ── Zoom join (reuses an existing driver) ─────────────────────────────────────
 
 _BROWSER_JOIN_SELECTORS = [
+    # Zoom web client — explicit "join from browser" text
+    ("xpath",             "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                          "'abcdefghijklmnopqrstuvwxyz'),'join from your browser')]"),
+    ("xpath",             "//button[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                          "'abcdefghijklmnopqrstuvwxyz'),'join from browser')]"),
+    ("xpath",             "//a[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                          "'abcdefghijklmnopqrstuvwxyz'),'join from your browser')]"),
+    # Legacy Zoom web UI — anchor by id
     ("id",                "btn_browser_join"),
     ("link_text",         "Join from Your Browser"),
-    ("partial_link_text", "join from your browser"),
-    ("partial_link_text", "join from browser"),
-    ("xpath",             "//*[contains(translate(.,'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
-                          "'abcdefghijklmnopqrstuvwxyz'),'join from your browser')]"),
 ]
 
 _NAME_SELECTORS = [
@@ -144,9 +156,9 @@ _NAME_SELECTORS = [
 
 _JOIN_BTN_SELECTORS = [
     ("id",    "joinBtn"),
-    ("css",   "button.join-btn"),
     ("css",   "button#joinBtn"),
-    ("xpath", "//button[contains(text(),'Join')]"),
+    ("css",   "button.join-btn"),
+    ("xpath", "//button[normalize-space(text())='Join']"),
     ("xpath", "//input[@value='Join']"),
 ]
 
@@ -175,17 +187,91 @@ def _find_clickable(driver, selectors, timeout=12):
     return None
 
 
+def _click_audio_skip_js(driver, timeout=45):
+    """
+    JS-based search: find any visible button/link whose text contains a
+    'skip audio/camera' keyword and click it. Returns the matched text or None.
+    The new Zoom web client renders everything via React so XPath/Selenium
+    selectors often miss elements — JS DOM traversal is more reliable.
+    """
+    _SKIP_KEYWORDS = [
+        "continue without audio and video",
+        "continue without microphone and camera",
+        "continue without microphone",
+        "without microphone and camera",
+        "join without audio",
+        "without audio and video",
+        "continue without video",
+        "continue without audio",
+        "continue without",
+        "without microphone",
+    ]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for kw in _SKIP_KEYWORDS:
+            found = driver.execute_script("""
+                var kw = arguments[0];
+                var tags = ['button','a','span','div','p'];
+                for (var t = 0; t < tags.length; t++) {
+                    var els = document.getElementsByTagName(tags[t]);
+                    for (var i = 0; i < els.length; i++) {
+                        var el = els[i];
+                        if (!el.offsetParent) continue;
+                        var text = (el.textContent || '').toLowerCase().trim();
+                        if (text && text.length < 100 && text.includes(kw)) {
+                            el.click();
+                            return text;
+                        }
+                    }
+                }
+                return null;
+            """, kw)
+            if found:
+                return found
+        time.sleep(1)
+    return None
+
+
 def _handle_zoom_page(driver, display_name: str):
     """Given a driver already on a Zoom page, click through the join flow."""
-    from selenium.common.exceptions import TimeoutException
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.action_chains import ActionChains
 
-    print("  On Zoom page — looking for 'Join from Your Browser'...")
-    join_link = _find_clickable(driver, _BROWSER_JOIN_SELECTORS, timeout=15)
+    # Dismiss Zoom cookie banner if present
+    for sel in ("button#onetrust-accept-btn-handler", "button[aria-label='Accept Cookies']"):
+        els = driver.find_elements(By.CSS_SELECTOR, sel)
+        if els and els[0].is_displayed():
+            try:
+                driver.execute_script("arguments[0].click();", els[0])
+                time.sleep(0.5)
+            except Exception:
+                pass
+            break
+    for btn in driver.find_elements(By.TAG_NAME, "button"):
+        if btn.is_displayed() and btn.text.strip().upper() in ("ACCEPT COOKIES", "ACCEPT ALL COOKIES"):
+            try:
+                driver.execute_script("arguments[0].click();", btn)
+                time.sleep(0.5)
+            except Exception:
+                pass
+            break
+
+    # If audio/camera skip prompt is already visible (e.g. cached session), dismiss it
+    found = _click_audio_skip_js(driver, timeout=3)
+    if found:
+        print(f"  Clicked audio skip (pre-join): {found!r}")
+        return
+
+    print("  On Zoom page — looking for 'Join from browser'...")
+    join_link = _find_clickable(driver, _BROWSER_JOIN_SELECTORS, timeout=5)
     if join_link:
-        join_link.click()
-        print("  Clicked 'Join from Your Browser'")
+        try:
+            ActionChains(driver).move_to_element(join_link).click().perform()
+        except Exception:
+            driver.execute_script("arguments[0].click();", join_link)
+        print("  Clicked 'Join from browser'")
     else:
-        print("  Could not find join-from-browser link.")
+        print("  No join-from-browser link — proceeding to name/join step.")
 
     if display_name:
         name_el = _find_clickable(driver, _NAME_SELECTORS, timeout=10)
@@ -197,9 +283,48 @@ def _handle_zoom_page(driver, display_name: str):
     join_btn = _find_clickable(driver, _JOIN_BTN_SELECTORS, timeout=10)
     if join_btn:
         join_btn.click()
-        print("  Clicked Join — you should now be in the meeting.")
+        print("  Clicked Join.")
     else:
-        print("  Join button not found; click it manually.")
+        print("  Join button not found — may have auto-joined.")
+
+    # After clicking Join, the web client connects via WebSocket then shows the
+    # audio/camera prompt. The new Zoom client (joinFlowPhase3) can take 30+ sec
+    # to connect before the dialog appears — wait up to 45 s.
+    print("  Waiting for audio/camera prompt (up to 45s)...")
+    found = _click_audio_skip_js(driver, timeout=45)
+    if found:
+        print(f"  Clicked audio skip: {found!r} — in the meeting.")
+    else:
+        # Debug dump: show all visible interactive elements
+        visible = driver.execute_script("""
+            var result = [];
+            var els = document.querySelectorAll('button, a, [role="button"]');
+            for (var i = 0; i < els.length; i++) {
+                var el = els[i];
+                var text = (el.textContent || '').trim();
+                if (text && el.offsetParent) result.push(text.substring(0, 70));
+            }
+            return result.slice(0, 25);
+        """)
+        print("  Audio prompt not found. Visible buttons/links on page:")
+        for v in (visible or []):
+            print(f"    {v!r}")
+
+
+# ── Zoom URL helpers ──────────────────────────────────────────────────────────
+
+def _zoom_to_webclient(url: str):
+    """Convert zoom.us/j/ID?pwd=... to zoom.us/wc/ID/join?pwd=... (web client)."""
+    import re
+    m = re.search(r'(https?://[^/]*zoom\.us)/j/(\d+)', url)
+    if not m:
+        return None
+    base, meeting_id = m.group(1), m.group(2)
+    pwd = re.search(r'[?&]pwd=([^&#]+)', url)
+    wc = f"{base}/wc/{meeting_id}/join"
+    if pwd:
+        wc += f"?pwd={pwd.group(1)}"
+    return wc
 
 
 # ── Sympla flow ────────────────────────────────────────────────────────────────
@@ -250,43 +375,34 @@ def _join_via_sympla(url: str, display_name: str, browser: str):
         return d
 
     driver = fresh_driver()
-    print("  Sympla page loaded — waiting for transmission button to activate...")
+    print("  Sympla page loaded — waiting for join URL from Vue...")
 
     elapsed = 0
     while elapsed < _SYMPLA_MAX_WAIT:
         try:
-            # ── 1. Direct Zoom link already on the page ──
-            zoom_anchors = driver.find_elements(By.XPATH, "//a[contains(@href,'zoom.us')]")
-            if zoom_anchors:
-                zoom_url = zoom_anchors[0].get_attribute("href")
-                print(f"  Found Zoom link: {zoom_url}")
-                driver.get(zoom_url)
-                time.sleep(2)
+            # ── Read urlExternal directly from the Vue component ──
+            # Sympla fetches the Zoom join URL via AJAX (/meetingroom/getJoinUrl)
+            # and stores it in the Vue instance's urlExternal property.
+            # Reading it directly is more reliable than clicking and intercepting popups.
+            result = driver.execute_script("""
+                var el = document.getElementById('streaming');
+                if (!el || !el.__vue__) return {state: 'no-vue', url: null};
+                var vm = el.__vue__;
+                var ref = (vm.chosenSettings && vm.chosenSettings.ref) || 'loading';
+                return {state: ref, url: vm.urlExternal || null};
+            """)
+            state = result.get("state") if result else "error"
+            zoom_url = result.get("url") if result else None
+            print(f"  Vue state: {state}  urlExternal: {str(zoom_url)[:80] if zoom_url else 'not set yet'}")
+
+            if zoom_url:
+                wc_url = _zoom_to_webclient(zoom_url)
+                target = wc_url or zoom_url
+                print(f"  Navigating to web client: {target[:80]}")
+                driver.get(target)
+                time.sleep(3)
                 _handle_zoom_page(driver, display_name)
                 return
-
-            # ── 2. Transmission button active ──
-            for btn in driver.find_elements(By.TAG_NAME, "button"):
-                if _sympla_button_is_active(btn):
-                    print(f"  Button active: '{btn.text.strip()}' — clicking...")
-                    btn.click()
-                    time.sleep(4)
-
-                    if "zoom.us" in driver.current_url:
-                        _handle_zoom_page(driver, display_name)
-                        return
-
-                    zoom_anchors = driver.find_elements(By.XPATH, "//a[contains(@href,'zoom.us')]")
-                    if zoom_anchors:
-                        zoom_url = zoom_anchors[0].get_attribute("href")
-                        print(f"  Zoom link found after redirect: {zoom_url}")
-                        driver.get(zoom_url)
-                        time.sleep(2)
-                        _handle_zoom_page(driver, display_name)
-                        return
-
-                    _handle_zoom_page(driver, display_name)
-                    return
 
         except InvalidSessionIdException:
             print("  Browser session lost — reopening...")
@@ -347,7 +463,7 @@ def open_meeting(url: str, display_name: str, browser: str):
 
 # ── Schedule parsing ───────────────────────────────────────────────────────────
 
-SYMPLA_PREOPEN_MIN = 10  # open the browser this many minutes before the event
+SYMPLA_PREOPEN_MIN = 5  # open the browser this many minutes before the event
 
 
 def _is_sympla(url: str) -> bool:
@@ -381,28 +497,30 @@ def parse_schedule(path: Path) -> list:
                 t = datetime.strptime(parts[0], "%H:%M").time()
                 url = parts[1]
                 open_t = _adjust_time(t, url)
-                entries.append({
-                    "type": "daily", "time": open_t, "url": url,
-                    "label": f"daily at {parts[0]}",
-                })
+                e = {"type": "daily", "time": open_t, "url": url, "label": f"daily at {parts[0]}"}
+                if _is_sympla(url):
+                    e["meeting_time"] = t
+                entries.append(e)
             elif len(parts) == 3:
                 if parts[0].lower() in WEEKDAY_MAP:
                     t = datetime.strptime(parts[1], "%H:%M").time()
                     wd = WEEKDAY_MAP[parts[0].lower()]
                     url = parts[2]
                     open_t = _adjust_time(t, url)
-                    entries.append({
-                        "type": "weekly", "weekday": wd, "time": open_t, "url": url,
-                        "label": f"every {WEEKDAY_NAMES[wd]} at {parts[1]}",
-                    })
+                    e = {"type": "weekly", "weekday": wd, "time": open_t, "url": url,
+                         "label": f"every {WEEKDAY_NAMES[wd]} at {parts[1]}"}
+                    if _is_sympla(url):
+                        e["meeting_time"] = t
+                    entries.append(e)
                 else:
                     dt = datetime.strptime(f"{parts[0]} {parts[1]}", "%Y-%m-%d %H:%M")
                     url = parts[2]
                     open_dt = _adjust_datetime(dt, url)
-                    entries.append({
-                        "type": "once", "datetime": open_dt, "url": url,
-                        "label": f"once on {parts[0]} {parts[1]}",
-                    })
+                    e = {"type": "once", "datetime": open_dt, "url": url,
+                         "label": f"once on {parts[0]} {parts[1]}"}
+                    if _is_sympla(url):
+                        e["meeting_datetime"] = dt
+                    entries.append(e)
             else:
                 print(f"  [line {lineno}] skipped (unrecognized format): {line!r}")
         except ValueError as e:
@@ -413,28 +531,59 @@ def parse_schedule(path: Path) -> list:
 def next_trigger(entry: dict, now: datetime):
     if entry["type"] == "daily":
         c = now.replace(hour=entry["time"].hour, minute=entry["time"].minute, second=0, microsecond=0)
-        if c <= now:
+        if "meeting_time" in entry:
+            mt = entry["meeting_time"]
+            meeting_dt = now.replace(hour=mt.hour, minute=mt.minute, second=0, microsecond=0)
+            if c <= now <= meeting_dt:
+                return now
+            if meeting_dt < now:
+                c += timedelta(days=1)
+        elif c <= now:
             c += timedelta(days=1)
         return c
     if entry["type"] == "weekly":
         days = (entry["weekday"] - now.weekday()) % 7
         c = (now + timedelta(days=days)).replace(
             hour=entry["time"].hour, minute=entry["time"].minute, second=0, microsecond=0)
-        if c <= now:
+        if "meeting_time" in entry:
+            mt = entry["meeting_time"]
+            meeting_dt = (now + timedelta(days=days)).replace(
+                hour=mt.hour, minute=mt.minute, second=0, microsecond=0)
+            if c <= now <= meeting_dt:
+                return now
+            if meeting_dt < now:
+                c += timedelta(weeks=1)
+        elif c <= now:
             c += timedelta(weeks=1)
         return c
     if entry["type"] == "once":
+        if "meeting_datetime" in entry:
+            preopen = entry["datetime"]
+            meeting = entry["meeting_datetime"]
+            if preopen <= now <= meeting:
+                return now
+            return preopen if now < preopen else None
         return entry["datetime"] if entry["datetime"] > now else None
 
 
 def should_fire(entry: dict, now: datetime) -> bool:
     if entry["type"] == "daily":
+        if "meeting_time" in entry:
+            mt = entry["meeting_time"]
+            t = now.time().replace(second=0, microsecond=0)
+            return entry["time"] <= t <= mt
         return now.hour == entry["time"].hour and now.minute == entry["time"].minute
     if entry["type"] == "weekly":
-        return (now.weekday() == entry["weekday"]
-                and now.hour == entry["time"].hour
-                and now.minute == entry["time"].minute)
+        if now.weekday() != entry["weekday"]:
+            return False
+        if "meeting_time" in entry:
+            mt = entry["meeting_time"]
+            t = now.time().replace(second=0, microsecond=0)
+            return entry["time"] <= t <= mt
+        return now.hour == entry["time"].hour and now.minute == entry["time"].minute
     if entry["type"] == "once":
+        if "meeting_datetime" in entry:
+            return entry["datetime"] <= now <= entry["meeting_datetime"]
         dt = entry["datetime"]
         return now.date() == dt.date() and now.hour == dt.hour and now.minute == dt.minute
     return False
@@ -442,6 +591,8 @@ def should_fire(entry: dict, now: datetime) -> bool:
 
 def format_eta(trigger: datetime, now: datetime) -> str:
     delta = int((trigger - now).total_seconds())
+    if delta <= 0:
+        return "now"
     if delta < 60:
         return "< 1 min"
     hours, rem = divmod(delta, 3600)
@@ -455,7 +606,12 @@ def print_schedule(entries: list, now: datetime):
         trigger = next_trigger(e, now)
         eta = format_eta(trigger, now) if trigger else "expired"
         if _is_sympla(e["url"]):
-            open_str = trigger.strftime("browser opens at %H:%M") if trigger else "expired"
+            if trigger is None:
+                open_str = "expired"
+            elif trigger <= now:
+                open_str = "open now"
+            else:
+                open_str = trigger.strftime("browser opens at %H:%M")
             print(f"  {e['label']:<30}  {eta:<16}  [sympla — {open_str}]")
         else:
             print(f"  {e['label']:<30}  {eta:<16}  [zoom]  {e['url'][:60]}")
@@ -503,15 +659,21 @@ def run(path: Path, display_name: str):
             continue
 
         now = datetime.now()
-        minute_key = now.strftime("%Y-%m-%d %H:%M")
 
         for i, entry in enumerate(entries):
-            if last_fired.get(i) == minute_key:
+            if _is_sympla(entry["url"]):
+                if entry["type"] == "once":
+                    fire_k = entry.get("meeting_datetime", entry["datetime"]).strftime("%Y-%m-%d %H:%M")
+                else:
+                    fire_k = now.strftime("%Y-%m-%d")
+            else:
+                fire_k = now.strftime("%Y-%m-%d %H:%M")
+            if last_fired.get(i) == fire_k:
                 continue
             if should_fire(entry, now):
                 print(f"[{now.strftime('%H:%M:%S')}] Opening: {entry['url'][:70]}")
                 open_meeting(entry["url"], display_name, browser)
-                last_fired[i] = minute_key
+                last_fired[i] = fire_k
 
         time.sleep(10)
 

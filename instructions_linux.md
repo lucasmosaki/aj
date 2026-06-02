@@ -111,6 +111,6 @@ tmux attach -t scheduler
 ## Notes
 
 - You can edit `schedule.txt` while the scheduler is running — it reloads automatically within 10 seconds.
-- For Sympla links, the browser opens 10 minutes before the scheduled time and waits for the room to activate.
+- For Sympla links, the browser opens 5 minutes before the scheduled time and waits for the room to activate.
 - If automation fails, the tool falls back to opening the URL in your default browser.
 - On headless servers (no display), you may need to run Chrome with `--headless` or use a virtual display (`xvfb`).
